@@ -1,0 +1,141 @@
+[data-hub-sidebar] {
+  --hub-sidebar-w: 14rem;
+  --hub-bar-bg: #ffffff;
+  --hub-line: #e4e4e7;
+  --hub-fg: #111827;
+  --hub-fg-muted: #6b7280;
+  --hub-hover: #fafafa; /* neutral-50 */
+  --hub-active-bg: #f5f5f5; /* neutral-100 */
+  --hub-active-fg: #111827;
+  --hub-active-bar: #111827; /* neutral-900 */
+  --hub-pill-clear: 3rem; /* top padding so the sidebar clears the Hub pill */
+}
+
+@media (prefers-color-scheme: dark) {
+  [data-hub-sidebar] {
+    --hub-bar-bg: #0a0a0a; /* neutral-950 */
+    --hub-line: rgba(255, 255, 255, 0.1);
+    --hub-fg: #f5f5f5;
+    --hub-fg-muted: #a3a3a3;
+    --hub-hover: #171717; /* neutral-900 */
+    --hub-active-bg: #262626; /* neutral-800 */
+    --hub-active-fg: #f5f5f5;
+    --hub-active-bar: #f5f5f5;
+  }
+}
+
+.hub-sidebar {
+  display: flex;
+  flex-direction: column;
+  width: var(--hub-sidebar-w);
+  flex: none;
+  overflow-y: auto;
+  background: var(--hub-bar-bg);
+  border-right: 1px solid var(--hub-line);
+  padding-top: var(--hub-pill-clear);
+  padding-bottom: 1rem;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.hub-sidebar__brand {
+  padding: 0 1rem 0.5rem;
+  font-weight: 700;
+  color: var(--hub-fg);
+}
+
+.hub-sidebar__title {
+  padding: 0 1rem 0.5rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--hub-fg-muted);
+}
+
+.hub-sidebar__nav {
+  display: flex;
+  flex-direction: column;
+}
+
+.hub-sidebar__link {
+  display: block;
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
+  color: var(--hub-fg-muted);
+  text-decoration: none;
+  border-left: 2px solid transparent;
+}
+.hub-sidebar__link:hover {
+  background: var(--hub-hover);
+  color: var(--hub-fg);
+}
+.hub-sidebar__link.is-active {
+  background: var(--hub-active-bg);
+  color: var(--hub-active-fg);
+  font-weight: 500;
+  border-left-color: var(--hub-active-bar);
+}
+
+.hub-sidebar__footer {
+  margin-top: auto;
+  padding: 0.75rem 1rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.68rem;
+  font-family: ui-monospace, monospace;
+  color: var(--hub-fg-muted);
+  opacity: 0.85;
+}
+
+/* Desktop: no toggle, no backdrop — the sidebar is always in the flex row. */
+.hub-sidebar__toggle {
+  display: none;
+}
+.hub-sidebar__backdrop {
+  display: none;
+}
+
+@media (max-width: 820px) {
+  /* Phone: the sidebar is a slide-in drawer toggled by a fixed hamburger. It's
+     top-right so it never collides with the Hub pill (top-left). */
+  .hub-sidebar__toggle {
+    position: fixed;
+    top: 0.5rem;
+    right: 0.75rem;
+    z-index: 46;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 36px;
+    padding: 0;
+    border: 1px solid var(--hub-line, #e4e4e7);
+    background: var(--hub-bar-bg, #fff);
+    color: var(--hub-fg, #111827);
+    border-radius: 8px;
+    font-size: 1.1rem;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .hub-sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 45;
+    padding-top: 3.25rem;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+  }
+  .hub-sidebar.is-open {
+    transform: translateX(0);
+  }
+  .hub-sidebar__backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 44;
+    background: rgba(0, 0, 0, 0.35);
+  }
+}
