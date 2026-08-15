@@ -22,14 +22,16 @@ app as a **git dependency pinned to a tag** (no npm registry). Next apps must ad
 - **One shared identity + (usually) one shared database.** Every app authenticates against the **same Supabase project** as the Hub and reads/writes the shared schema under **RLS**. The Hub is the identity provider; your app gets the session for free (no second login) via a **postMessage handoff**.
 - **Two environments, mirrored everywhere.** `staging` (branch → preview deploy → staging Supabase branch DB) and `main`/prod. **Hub and app must point at the SAME Supabase project per environment**, or the handed-off token is invalid.
 
-### Pick your app's data model first
+### Separate your data by SCHEMA, not by project
 
-| Type | When | DB |
+**One shared Supabase project = one auth.** The SSO handoff works *only* because your app adopts the Hub's session against **that same project** — a Hub JWT is invalid against any other Supabase project. So you don't get a separate auth per app; you separate *data* by **schema**:
+
+| Approach | When | Data |
 |---|---|---|
-| **Shared-DB (default)** | Your data belongs with CRM/PIM/ERP; you want RLS + org scoping for free | Add tables to the shared Supabase via `gs-internal-supabase-db` migrations (§2) |
-| **Own-DB, shared auth** | Your data is large/independent (e.g. Warehouse's `gs-items`) | Your own DB, but still authenticate with the Hub's Supabase session and guard data in **your own server routes**. See Notion "Unified Login for Separate-DB Hub Apps". |
+| **Shared project, own schema (default — do this)** | Almost always | Add a `<app>` schema (alongside `crm`/`pim`/`prospector`) in the shared Supabase via `gs-internal-supabase-db` migrations (§2). RLS + org scoping + the adopted Hub session all work natively. |
+| **Separate data *store*, still shared auth (exception)** | Data genuinely can't live in shared Postgres — an external system or a huge/independent store (e.g. Warehouse's `gs-items`) | **Auth is still the shared Supabase project** — you adopt the Hub session exactly the same way. Only the *data* lives elsewhere; guard it in your **own server routes** by validating that Hub session server-side. This is **not** a second Supabase auth/project. |
 
-Either way the **auth + embedding** steps (§4–5) are identical.
+Either way the **auth + embedding** steps (§4–5) are identical — every app adopts the one shared session.
 
 ## 1. Architecture you're plugging into
 
