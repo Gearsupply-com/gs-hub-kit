@@ -10,68 +10,140 @@ app as a **git dependency pinned to a tag** (no npm registry). Next apps must ad
 
 ---
 
-# Adding a new app to the Gearsupply Hub — runbook
+# Adding a new app to the Gearsupply Hub — complete runbook
 
-How to stand up a new app, embed it in the Hub, and get one-login SSO — on **staging and prod**.
-Distilled from standing up PIM + Prospector in the Hub (2026-08); every gotcha below was hit for real.
+**Audience:** any engineer (or coding agent) standing up a brand-new app and adding it to the Hub — start to finish, staging then prod. Everything below was proven standing up PIM + Prospector + Warehouse (2026-08); every gotcha was hit for real.
 
-> Until the `hub-app` skill (gs-claude-kit, spec P3) exists, this runbook is the checklist.
+> **For agents (Claude):** do as much of this yourself as your tools allow — create the Vercel project, set env vars, disable Deployment Protection, open PRs, land migrations through `gs-internal-supabase-db`, and verify with `curl`. The **"Agent autonomy"** table near the end says exactly what to automate and what to hand to a human. Never hand a human a step you could have done.
 
-## Mental model
+## 0. The 60-second model
 
-- Each Hub app is a **cross-origin iframe** on its own Vercel origin. The Hub can't render inside it — it overlays the floating "Gearsupply Hub /" pill and **posts the session in**.
-- The Hub embeds by **origin**: `NEXT_PUBLIC_<APP>_URL` → `HandoffEmbed` computes `childOrigin = new URL(src).origin` and posts `SET_SESSION` there.
-- Auth is a **postMessage handoff**, not a second login. The Hub is the **sole** Supabase token refresher; the app receives `SET_SESSION` and calls `supabase.auth.setSession(...)`. supabase-js stores the session in **localStorage, not cookies** → third-party-cookie blocking is a non-issue.
+- **One Hub, many apps.** Each app is its **own repo + its own Vercel project**, embedded in the Hub shell (`hub.gearsupply.com`) as a **cross-origin iframe**. The Hub can't render inside your app — it overlays a floating pill and **posts the user's session in**.
+- **One shared identity + (usually) one shared database.** Every app authenticates against the **same Supabase project** as the Hub and reads/writes the shared schema under **RLS**. The Hub is the identity provider; your app gets the session for free (no second login) via a **postMessage handoff**.
+- **Two environments, mirrored everywhere.** `staging` (branch → preview deploy → staging Supabase branch DB) and `main`/prod. **Hub and app must point at the SAME Supabase project per environment**, or the handed-off token is invalid.
 
-## Domains — use a Vercel URL, skip Cloudflare (the fast path)
+### Pick your app's data model first
 
-You do **not** need a Cloudflare subdomain to embed an app. The Hub embeds by origin, and the allowlists accept `https://*.vercel.app`. Point the Hub tab at the app's **stable Vercel URL**:
-
-| Env | Hub tab points at |
-|---|---|
-| prod | `gs-<app>.vercel.app` (production alias) |
-| staging | `gs-<app>-git-staging-<team>.vercel.app` (Vercel's auto branch-alias for the `staging` branch — stable, redeploys on each staging push) |
-
-**Required caveat (the crux):** `*.vercel.app` URLs are **not** "custom domains", so under Vercel Deployment Protection scope `all_except_custom_domains` they hit the Vercel SSO wall (`302 → vercel.com/sso-api`) and the iframe returns 403. **Turn Vercel Authentication OFF** on the app's Vercel project (Settings → Deployment Protection → Vercel Authentication). The app stays gated by its own Supabase auth, so nothing is truly exposed.
-
-A Cloudflare custom domain (e.g. `<app>-staging.gearsupply.com`) is optional — nicer for prod, and SSO-exempt under that scope — but it needs a **manual** DNS record. Skip it unless you want the pretty URL.
-
-## Steps
-
-1. **Repo + Supabase.** Follow the `staging` → `main` branch model. Apps share the Gearsupply Supabase (schema managed in `gs-internal-supabase-db`): staging reads the shared **`staging` branch DB**, prod reads prod. No per-app database.
-2. **Vercel project.** Staging deploys from `staging`, prod from `main`. **Disable Vercel Authentication** (Deployment Protection) so the iframe origin actually loads the app instead of the SSO wall.
-3. **Register the tab in the Hub** (`gs-hub` `lib/tabs.ts`): `{ key, label, src: process.env.NEXT_PUBLIC_<APP>_URL || "https://gs-<app>.vercel.app" }`. Then set `NEXT_PUBLIC_<APP>_URL` **per environment** on the `gs-hub` Vercel project — **Preview** scope = the staging URL, **Production** scope = the prod URL. (Env *scope* matters: `hub-staging` must be a deploy that reads Preview-scoped vars.)
-4. **Allow framing.** The app must send `Content-Security-Policy: frame-ancestors 'self' <hub origins>` and **no** `X-Frame-Options: DENY/SAMEORIGIN`. **Bake** the origins into the build (survives Vercel build-cache reuse) with an env escape hatch.
-5. **Wire the session bridge.** A child bridge listens for `SET_SESSION` from an **origin allowlist** and `setSession()`s it. Today that's per-app (Prospector `HubBridge`, PIM `EmbeddedAuthBridge`) following the "Hub → Child App Session Handoff" contract; once kit P2 lands, use `createHubSession()` from this kit. The allowlist must include the **same** Hub origins as frame-ancestors.
-6. **`AuthGate`: never show a login inside the iframe.** When embedded (`window.parent !== window`) and unauthed → render a **"Reconnecting…"** screen and keep re-requesting the session; **never a login form**. A login button in the frame is a dead end: **Google OAuth is blocked inside iframes** (Google returns `403 — you do not have access`). The session must come from the parent.
-
-## The two allowlists — both must include EVERY Hub origin (incl. staging)
-
-| Allowlist | Controls | Lives in |
+| Type | When | DB |
 |---|---|---|
-| `frame-ancestors` (CSP) | who may **frame** the app | app `next.config` headers / middleware |
-| hub-origin allowlist | who the app **trusts for `SET_SESSION`** | app embed bridge + env var |
+| **Shared-DB (default)** | Your data belongs with CRM/PIM/ERP; you want RLS + org scoping for free | Add tables to the shared Supabase via `gs-internal-supabase-db` migrations (§2) |
+| **Own-DB, shared auth** | Your data is large/independent (e.g. Warehouse's `gs-items`) | Your own DB, but still authenticate with the Hub's Supabase session and guard data in **your own server routes**. See Notion "Unified Login for Separate-DB Hub Apps". |
 
-Hub origins to include: `https://hub.gearsupply.com`, `https://hub-staging.gearsupply.com`, `https://gs-hub-gearsupply.vercel.app`, `https://gs-hub-sable.vercel.app` (a `https://*.vercel.app` wildcard entry is supported too).
+Either way the **auth + embedding** steps (§4–5) are identical.
 
-> **#1 gotcha — "prod baked, staging forgotten."** Both lists commonly ship with the prod Hub baked in but omit `hub-staging.gearsupply.com`. Result: the staging Hub can't frame the app (CSP) *and* can't sign it in (SET_SESSION rejected). Include `hub-staging` from day one.
+## 1. Architecture you're plugging into
 
-**Env-var drift to standardize:** Prospector reads `NEXT_PUBLIC_HUB_ALLOWED_ORIGINS`, PIM reads `NEXT_PUBLIC_HUB_ORIGINS`. Pick one for new apps — recommend **`NEXT_PUBLIC_HUB_ALLOWED_ORIGINS`** — and have the kit's `createHubSession()` own it so apps stop diverging.
+- **Supabase (shared):** project `hhfpccwjxyexypwotijn` (prod) with a persistent **`staging` branch** (`zbczikbtgivvdpoheseh`). Schema is owned by **`gs-internal-supabase-db`** (the only repo that applies migrations). Schemas in use: `public` (users, orgs, apps, profiles, app_access), `crm`, `erp`, `pim`, `prospector`, `marts`, `crawler`.
+- **Identity + gating:** `public.profiles.is_admin` = Hub super-admin; `public.app_access` (per-user, per-app, 4-tier `viewer/contributor/manager/admin`) drives which tabs a user sees and what they can do. Org scoping via `public.users.org_id` + `current_org_id()` in RLS.
+- **Auth:** Google OAuth (PKCE). The **Hub** owns login + token refresh; embedded apps receive the session and **must not self-refresh** (dual-refresh races log the user out).
+- **Client keys:** browser uses the **publishable** key (`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`) with RLS; server-only code uses `SUPABASE_SECRET_KEY` / `SUPABASE_DB_URL`. Never ship the secret key to the browser.
 
-## Gotchas (all hit standing up PIM + Prospector)
+## 2. Database architecture — how to add tables (the one rule)
 
-- **Vercel SSO wall** applies to `*.vercel.app` and preview-branch custom domains even under `all_except_custom_domains` — only the **prod** custom domain is exempt. → disable Deployment Protection.
-- **staging branch behind main:** if the app's `staging` branch lacks the embed-bridge code, the deployed staging app can't do the handoff and falls back to a (broken) login. Keep `staging` synced with `main` — Prospector's staging was a whole feature behind and had to be caught up first.
-- **localStorage, not cookies:** if sign-in doesn't stick, it's the allowlist/handshake — not third-party cookies.
-- **Env scope ≠ domain→branch mapping:** confirm `hub-staging` is served by a deploy that reads the Preview-scoped `NEXT_PUBLIC_*_URL` vars.
+**All shared-DB schema changes go through `gs-internal-supabase-db` as a migration. Never run DDL from your app repo, never `supabase db push` from anywhere else, never apply SQL by hand or via MCP against prod.** That repo's CI is the sole applier.
 
-## Verify (staging)
+1. `git switch staging && git pull` in `gs-internal-supabase-db` (always branch from `staging`).
+2. New migration file: **UTC-timestamp prefix** `YYYYMMDDHHMMSS_name.sql` (never sequential integers — parallel agents collide otherwise). Check prod `schema_migrations` for the latest version so yours sorts after it.
+3. Write **additive, idempotent** DDL: `create table if not exists`, `add column if not exists`, `on conflict do nothing`. Add **RLS**: `enable row level security` + policies scoped by `current_org_id()` (copy an existing table's policy). An app deploy must work before *or* after the migration lands.
+4. Commit to `staging` → PR → merge to `staging`. The Supabase branch integration applies it to the **staging branch DB**. Test against your staging app.
+5. Promote: PR **`staging` → `main`**. CI (`db-migrate.yml`, `supabase db push --include-all`) applies it to **prod**.
+
+**Per-environment Supabase creds (this is how a staging app reads the staging DB):**
+
+| App env (Vercel scope) | `NEXT_PUBLIC_SUPABASE_URL` | Key |
+|---|---|---|
+| Preview (staging) | `https://zbczikbtgivvdpoheseh.supabase.co` (staging branch) | staging branch publishable key |
+| Production | `https://hhfpccwjxyexypwotijn.supabase.co` (prod) | prod publishable key |
+
+The Hub uses the **same** mapping — that's what keeps the handed-off session valid.
+
+## 3. Stand up the app (repo + Vercel + Supabase)
+
+1. **Repo:** new `Gearsupply-com/gs-<app>` (Next.js). Add `@gearsupply/hub-kit` as a git dependency pinned to a tag; add it to `transpilePackages`. Create a long-lived **`staging` branch** off `main` — you deploy and test there first.
+2. **Vercel project:** import the repo (framework auto-detects Next.js; no `vercel.json` needed). Production Branch = `main`; `staging` auto-gets a preview + a stable branch alias `gs-<app>-git-staging-<team>.vercel.app`.
+3. **Env vars (per environment):**
+
+    | Var | Preview (staging) | Production | Notes |
+    |---|---|---|---|
+    | `NEXT_PUBLIC_SUPABASE_URL` | staging branch URL | prod URL | §2 table |
+    | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | staging key | prod key | browser, RLS |
+    | `SUPABASE_SECRET_KEY` | staging | prod | server only |
+    | `NEXT_PUBLIC_HUB_ALLOWED_ORIGINS` | `https://hub-staging.gearsupply.com` | *(optional; prod hub is baked)* | §4 allowlist |
+
+4. **Disable Vercel Authentication** (Project → Settings → Deployment Protection → Vercel Authentication → off). Required so the Hub can iframe your Vercel URL (see §4 domains). Your app is still gated by its own Supabase auth.
+5. **Supabase client:** browser client with `createBrowserClient(url, publishableKey)`; **when embedded, disable auto-refresh** (`autoRefreshToken:false`) — the Hub is the sole refresher. Copy Prospector's `src/lib/supabase/browserClient.ts`.
+
+## 4. Embed in the Hub
+
+**Domains — use a Vercel URL, skip Cloudflare (fast path).** The Hub embeds by *origin* and the allowlists accept `https://*.vercel.app`, so you don't need a Cloudflare subdomain. Point the Hub tab at your stable Vercel URL: prod `gs-<app>.vercel.app`, staging `gs-<app>-git-staging-<team>.vercel.app`. **Caveat:** `*.vercel.app` isn't a "custom domain", so under Deployment Protection `all_except_custom_domains` it's behind the Vercel SSO wall (`302 → vercel.com/sso-api`) → the iframe 403s. That's why §3.4 disables Vercel Authentication. A Cloudflare custom domain is optional (nicer prod, SSO-exempt) but needs a **manual DNS record** — skip unless you want the pretty URL.
+
+1. **Register the tab** in `gs-hub` `lib/tabs.ts`: `{ slug, label, src: process.env.NEXT_PUBLIC_<APP>_URL || "https://gs-<app>.vercel.app", allow?: "camera; microphone" }`.
+2. **Hub env vars:** set `NEXT_PUBLIC_<APP>_URL` on the `gs-hub` project — **Preview** = your staging URL, **Production** = your prod URL. (Scope matters: `hub-staging` must be a deploy that reads Preview-scoped vars.)
+3. **Allow framing:** your app sends `Content-Security-Policy: frame-ancestors 'self' <hub origins>` and **no** `X-Frame-Options: DENY/SAMEORIGIN`. **Bake** the origins into the build (survives Vercel build-cache) with an env escape hatch (see gs-pim `next.config.ts`).
+4. **The two allowlists — both must include EVERY Hub origin, including staging:**
+
+    | Allowlist | Controls | Lives in |
+    |---|---|---|
+    | `frame-ancestors` (CSP) | who may **frame** the app | app `next.config` headers/middleware |
+    | hub-origin allowlist | who the app **trusts for `SET_SESSION`** | app embed bridge + env var |
+
+    Hub origins: `https://hub.gearsupply.com`, `https://hub-staging.gearsupply.com`, `https://gs-hub-gearsupply.vercel.app`, `https://gs-hub-sable.vercel.app` (a `https://*.vercel.app` wildcard entry works too).
+
+    > **#1 gotcha — "prod baked, staging forgotten."** Teams bake the prod Hub but omit `hub-staging.gearsupply.com` → the staging Hub can't frame the app (CSP) *and* can't sign it in (`SET_SESSION` rejected). Include `hub-staging` from day one.
+
+    **Env-var drift:** Prospector reads `NEXT_PUBLIC_HUB_ALLOWED_ORIGINS`, PIM reads `NEXT_PUBLIC_HUB_ORIGINS`. **Use `NEXT_PUBLIC_HUB_ALLOWED_ORIGINS` for new apps** and let the kit's `createHubSession()` own it.
+
+## 5. Auth end-to-end
+
+- **Embedded (the normal case):** the Hub's `HandoffEmbed` posts `SET_SESSION` to your origin on `APP_READY`/`REQUEST_SESSION`/token-refresh/focus. Your **child bridge** (kit `createHubSession()` once P2 ships; until then copy Prospector's `HubBridge` / PIM's `EmbeddedAuthBridge`) validates the sender origin against the allowlist and calls `supabase.auth.setSession(...)`. supabase-js stores the session in **localStorage, not cookies** → third-party-cookie blocking is a non-issue.
+- **`AuthGate`:** when embedded (`window.parent !== window`) and unauthed → show **"Reconnecting…"** and keep re-requesting the session; **never a login form.** A Google login button inside the iframe is a dead end — **Google blocks OAuth in iframes (`403 — you do not have access`)**. Standalone (app opened directly), show the sign-in screen.
+- **Standalone sign-in / OAuth redirect URLs:** if the app is ever opened directly (not embedded) and does Google OAuth, its origin must be in **Supabase Auth → URL Configuration → Redirect URLs** (add `https://gs-<app>.vercel.app`, the staging branch alias, and any custom domain). Embedded-only apps don't need this.
+
+## 6. Set up the STAGING environment (do this first, every time)
+
+1. App: `staging` branch exists and deploys on Vercel; **Vercel Authentication disabled**; Preview env vars point at the **staging branch Supabase** (§2) and `NEXT_PUBLIC_HUB_ALLOWED_ORIGINS` includes `https://hub-staging.gearsupply.com`.
+2. App code (on `staging`): `frame-ancestors` + hub-origin allowlist include the staging Hub; the embed bridge + `AuthGate` are present. **If `staging` is behind `main`, the bridge code may be missing — sync `main`→`staging` first** (this bit Prospector: its `staging` was a whole feature behind and had to be caught up before embedding worked).
+3. Hub: `NEXT_PUBLIC_<APP>_URL` (Preview scope) = your staging branch-alias URL; the tab is registered.
+4. DB: any new tables landed on the `gs-internal-supabase-db` **`staging`** branch (§2) so the staging branch DB has them.
+5. **Verify** (§9), then and only then promote to `main` (§7).
+
+## 7. Change flow: staging → main (never straight to main)
+
+Same shape in every repo:
+
+1. Feature branch → PR into **`staging`** → merge. Vercel builds a **staging preview**; it reads the **staging** Supabase branch. Test there.
+2. When staging is green, PR **`staging` → `main`** → merge → prod deploy (apps run `deploy-prod.yml`; `preview-smoke.yml` guards previews).
+3. **DB changes** ride the same rails but in `gs-internal-supabase-db`: land on `staging` (applies to staging branch DB), then PR `staging`→`main` (CI applies to prod). Keep app deploys backward-compatible so either order is safe.
+
+Never commit migrations or app-embedding changes straight to `main` — they must bake on staging behind the staging Hub first.
+
+## 8. Agent autonomy — what Claude does itself vs. what needs a human
+
+**Do these yourself** (you have the tools):
+
+| Task | How |
+|---|---|
+| Create/configure the Vercel project, set env vars, **disable Deployment Protection** | Vercel MCP (`create_git_project`, env tools, `update_project_deployment_protection`) |
+| Register the Hub tab, add `frame-ancestors` + hub allowlist, wire the bridge | edit code + open PRs (`gh`) into each repo's `staging` |
+| Author + land DB migrations | new migration in `gs-internal-supabase-db`, PR `staging`→`main`; CI applies (never direct DB writes) |
+| Inspect/query DB, read branch-action logs, reset a Supabase branch | Supabase MCP (`execute_sql`, `get_logs service=branch-action`, `reset_branch`) |
+| Verify headers / SSO wall / framing | `curl -sSI` (see §9) |
+| Merge PRs into `staging` (unprotected) and drive the staging→main promotion | `gh pr merge` |
+
+**Escalate to a human** (out of an agent's reach — say so explicitly and give the exact click-path):
+
+- **Cloudflare DNS** for a custom domain — manual. (Default to the Vercel URL to avoid this entirely.)
+- **Supabase Auth config** — adding a standalone app origin to **Redirect URLs**, or Google OAuth client changes (dashboard).
+- **Supabase staging branch** ops when the management token can't reach the branch ref (`execute_sql` returns "permission denied") — the human runs SQL in the branch's SQL editor, or fixes a wedged `branch-action` (see gs-internal-supabase-db memory: the staging branch auto-apply can 404).
+- **Merging to `main`/prod** — get an explicit human OK before any prod-affecting merge.
+
+## 9. Verify (staging)
 
 ```bash
-# 1) protection is off + framing is allowed (no SSO redirect, CSP present):
+# Protection off + framing allowed:
 curl -sSI https://<app-staging-url> | grep -iE 'location|content-security-policy'
-#   BAD:  location: https://vercel.com/sso-api?...      (Deployment Protection still on)
+#   BAD:  location: https://vercel.com/sso-api?...          (Deployment Protection still on)
 #   GOOD: content-security-policy: frame-ancestors 'self' https://hub-staging.gearsupply.com ...
 ```
 
-Then load `https://hub-staging.gearsupply.com`, open the app's tab: it should **render** (framing OK) and **sign in automatically** (handoff OK) — no login form, no 403.
+Then load `https://hub-staging.gearsupply.com`, open the app's tab: it must **render** (framing OK) and **sign in automatically** (handoff OK) — no login form, no 403. If it hangs "Reconnecting…"/"Signing you in…": the hub-origin allowlist is missing `hub-staging` or its env var isn't set. If it shows a Google login that 403s: the app isn't getting the session (allowlist/bridge) or `staging` is behind `main`.
