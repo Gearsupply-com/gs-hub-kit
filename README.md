@@ -93,11 +93,11 @@ The Hub uses the **same** mapping — that's what keeps the handed-off session v
 
     > **#1 gotcha — "prod baked, staging forgotten."** Teams bake the prod Hub but omit `hub-staging.gearsupply.com` → the staging Hub can't frame the app (CSP) *and* can't sign it in (`SET_SESSION` rejected). Include `hub-staging` from day one.
 
-    **Env-var drift:** Prospector reads `NEXT_PUBLIC_HUB_ALLOWED_ORIGINS`, PIM reads `NEXT_PUBLIC_HUB_ORIGINS`. **Use `NEXT_PUBLIC_HUB_ALLOWED_ORIGINS` for new apps** and let the kit's `createHubSession()` own it.
+    **Env-var (standardized in kit v0.3.0):** use `NEXT_PUBLIC_HUB_ALLOWED_ORIGINS` — the kit's `createHubSession()` reads it and **bakes in every Hub origin, including `hub-staging`**, so a new app can't hit the gotcha above. Legacy `NEXT_PUBLIC_HUB_ORIGINS` (PIM) is retired on migration.
 
 ## 5. Auth end-to-end
 
-- **Embedded (the normal case):** the Hub's `HandoffEmbed` posts `SET_SESSION` to your origin on `APP_READY`/`REQUEST_SESSION`/token-refresh/focus. Your **child bridge** (kit `createHubSession()` once P2 ships; until then copy Prospector's `HubBridge` / PIM's `EmbeddedAuthBridge`) validates the sender origin against the allowlist and calls `supabase.auth.setSession(...)`. supabase-js stores the session in **localStorage, not cookies** → third-party-cookie blocking is a non-issue.
+- **Embedded (the normal case):** the Hub's `HandoffEmbed` posts `SET_SESSION` to your origin on `APP_READY`/`REQUEST_SESSION`/token-refresh/focus. Your **child bridge** is `useHubSession()` / `createHubSession()` from `@gearsupply/hub-kit` (v0.3.0+): mount it above your `AuthGate`, pass `appKey` + `setSession: (t) => supabase.auth.setSession(t)`; it validates the sender origin against the allowlist (all Hub origins incl. `hub-staging` baked in) and adopts the session. supabase-js stores the session in **localStorage, not cookies** → third-party-cookie blocking is a non-issue. (Prospector/PIM still run their own bespoke bridges pending migration — see the kit's P2 follow-up.)
 - **`AuthGate`:** when embedded (`window.parent !== window`) and unauthed → show **"Reconnecting…"** and keep re-requesting the session; **never a login form.** A Google login button inside the iframe is a dead end — **Google blocks OAuth in iframes (`403 — you do not have access`)**. Standalone (app opened directly), show the sign-in screen.
 - **Standalone sign-in / OAuth redirect URLs:** if the app is ever opened directly (not embedded) and does Google OAuth, its origin must be in **Supabase Auth → URL Configuration → Redirect URLs** (add `https://gs-<app>.vercel.app`, the staging branch alias, and any custom domain). Embedded-only apps don't need this.
 
